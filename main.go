@@ -1,4 +1,3 @@
-
 package main
 
 import (
@@ -16,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
@@ -24,15 +24,16 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const (
-	HarnessAPIKey        = "pat"
-	GitHubOwner          = "gregkroonorg"
-	GitHubRepo           = "terraform-module-upgrade-demo-harnessrepo"
-	GitHubAppID          = "1234"
-	GitHubInstallationID = "1234"
-	GroupBranchName      = "bot-terraform-upgrades"
-	PrivateKeyPath       = "/Users/gregkroon/Downloads/harness-integration-app.2025-03-22.private-key.pem"
+var (
+	HarnessAPIKey        = os.Getenv("HARNESS_API_KEY")
+	GitHubOwner          = os.Getenv("GITHUB_OWNER")
+	GitHubAppID          = os.Getenv("GITHUB_APP_ID")
+	GitHubInstallationID = os.Getenv("GITHUB_INSTALLATION_ID")
+	GroupBranchName      = os.Getenv("GROUP_BRANCH_NAME")
+	PrivateKeyPath       = os.Getenv("GITHUB_PRIVATE_KEY_PATH")
 )
+
+var GitHubRepos = deduplicate(strings.Split(os.Getenv("GITHUB_REPOS"), ","))
 
 type TerraformModule struct {
 	Path       string
@@ -47,24 +48,92 @@ type TerraformModule struct {
 	System     string
 }
 
+type PRResult struct {
+	Repo   string
+	PR     int
+	Status string // success, failed, skipped
+}
+
 func main() {
+	required := []string{
+		"HARNESS_API_KEY", "GITHUB_OWNER", "GITHUB_APP_ID", "GITHUB_INSTALLATION_ID", "GROUP_BRANCH_NAME", "GITHUB_PRIVATE_KEY_PATH", "GITHUB_REPOS",
+	}
+	for _, env := range required {
+		if os.Getenv(env) == "" {
+			log.Fatalf("❌ Missing required environment variable: %s", env)
+		}
+	}
+
+	if len(GitHubRepos) == 0 {
+		log.Fatal("❌ GITHUB_REPOS is not set or contains only invalid/empty entries.")
+	}
+
 	githubToken := getGitHubToken()
 	harnessAPIKey := HarnessAPIKey
-	repoPath := cloneRepo(githubToken)
+
+	var wg sync.WaitGroup
+	maxConcurrent := 4
+	semaphore := make(chan struct{}, maxConcurrent)
+
+	var resultsMu sync.Mutex
+	var results []PRResult
+
+	for _, repo := range GitHubRepos {
+		wg.Add(1)
+		semaphore <- struct{}{}
+
+		go func(repo string) {
+			defer wg.Done()
+			defer func() { <-semaphore }()
+
+			repoResults := processRepo(repo, githubToken, harnessAPIKey)
+
+			resultsMu.Lock()
+			results = append(results, repoResults...)
+			resultsMu.Unlock()
+		}(repo)
+	}
+
+	wg.Wait()
+
+	fmt.Println("\n📊 Upgrade Summary:")
+	if len(results) == 0 {
+		fmt.Println("No upgrades were performed.")
+		return
+	}
+
+	for _, r := range results {
+		status := strings.ToUpper(r.Status)
+		switch status {
+		case "SUCCESS":
+			fmt.Printf("✅ %-40s PR #%d → %s\n", r.Repo, r.PR, status)
+		case "FAILED":
+			fmt.Printf("❌ %-40s PR #%d → %s\n", r.Repo, r.PR, status)
+		case "TIMEOUT":
+			fmt.Printf("⏰ %-40s PR #%d → %s\n", r.Repo, r.PR, status)
+		default:
+			fmt.Printf("⚠️ %-40s PR #%d → %s\n", r.Repo, r.PR, status)
+		}
+	}
+}
+
+func processRepo(repo, githubToken, harnessAPIKey string) []PRResult {
+	log.Printf("🚀 Processing repository: %s", repo)
+	repoPath := cloneRepo(githubToken, repo)
 	defer os.RemoveAll(repoPath)
 
 	modules := detectModules(repoPath)
 	if len(modules) == 0 {
-		log.Println("No Terraform modules detected.")
-		return
+		log.Printf("📭 No Terraform modules detected in %s", repo)
+		return nil
 	}
 
 	var majorUpgrades, batchUpgrades []TerraformModule
+	var results []PRResult
 
 	for _, mod := range modules {
 		var latestVersion string
 		var err error
-
 		switch mod.SourceType {
 		case "github":
 			latestVersion, err = fetchLatestGitHubRelease(mod.Source, githubToken)
@@ -93,67 +162,43 @@ func main() {
 	}
 
 	if len(batchUpgrades) > 0 {
+		branch := fmt.Sprintf("bot-upgrades-%s", strings.ReplaceAll(repo, ".", "-"))
 		applyModuleUpdates(repoPath, batchUpgrades)
-		createPR(repoPath, batchUpgrades, GroupBranchName, githubToken)
-
-		if pr := getOpenPRNumber(GroupBranchName, githubToken); pr > 0 {
-			monitorAndMergePR(pr, GroupBranchName, githubToken)
+		createPR(repo, repoPath, batchUpgrades, branch, githubToken)
+		if pr := getOpenPRNumber(repo, branch, githubToken); pr > 0 {
+			status := monitorAndMergePR(repo, pr, branch, githubToken)
+			results = append(results, PRResult{Repo: repo, PR: pr, Status: status})
 		}
 	}
 
 	for _, mod := range majorUpgrades {
-		branch := fmt.Sprintf("bot-upgrade-%s", strings.ReplaceAll(filepath.Base(mod.Path), ".", "-"))
-		repoPath := cloneRepo(githubToken)
+		branch := fmt.Sprintf("bot-upgrade-%s-%s", strings.ReplaceAll(repo, ".", "-"), strings.ReplaceAll(filepath.Base(mod.Path), ".", "-"))
+		repoPath := cloneRepo(githubToken, repo)
 		defer os.RemoveAll(repoPath)
-
 		applyModuleUpdates(repoPath, []TerraformModule{mod})
-		createPR(repoPath, []TerraformModule{mod}, branch, githubToken)
-
-		if pr := getOpenPRNumber(branch, githubToken); pr > 0 {
-			monitorAndMergePR(pr, branch, githubToken)
+		createPR(repo, repoPath, []TerraformModule{mod}, branch, githubToken)
+		if pr := getOpenPRNumber(repo, branch, githubToken); pr > 0 {
+			status := monitorAndMergePR(repo, pr, branch, githubToken)
+			results = append(results, PRResult{Repo: repo, PR: pr, Status: status})
 		}
 	}
 
-	if len(batchUpgrades) == 0 && len(majorUpgrades) == 0 {
-		log.Println("✅ No module upgrades needed.")
+	if len(results) == 0 {
+		log.Printf("✅ No module upgrades needed in %s", repo)
 	}
+	return results
 }
 
-func getOpenPRNumber(branch, token string) int {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", GitHubOwner, GitHubRepo)
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "token "+token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		log.Printf("❌ Failed to get PRs: %v", err)
-		return -1
-	}
-	defer resp.Body.Close()
+func monitorAndMergePR(repo string, prNumber int, branch, token string) string {
+	prURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", GitHubOwner, repo, prNumber)
 
-	var prs []struct {
-		Number int `json:"number"`
-		Head   struct {
-			Ref string `json:"ref"`
-		} `json:"head"`
-	}
-	json.NewDecoder(resp.Body).Decode(&prs)
-
-	for _, pr := range prs {
-		if pr.Head.Ref == branch {
-			return pr.Number
-		}
-	}
-	return -1
-}
-
-func monitorAndMergePR(prNumber int, branch, token string) {
-	prURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", GitHubOwner, GitHubRepo, prNumber)
 	req, _ := http.NewRequest("GET", prURL, nil)
 	req.Header.Set("Authorization", "token "+token)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Fatalf("❌ Failed to get PR details: %v", err)
+		log.Printf("❌ Failed to get PR #%d details for repo %s: %v", prNumber, repo, err)
+		return "failed"
 	}
 	defer resp.Body.Close()
 
@@ -163,46 +208,62 @@ func monitorAndMergePR(prNumber int, branch, token string) {
 		} `json:"head"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
-		log.Fatalf("❌ Failed to decode PR details: %v", err)
+		log.Printf("❌ Failed to decode PR #%d details for repo %s: %v", prNumber, repo, err)
+		return "failed"
 	}
 	sha := pr.Head.SHA
 
-	statusURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s/status", GitHubOwner, GitHubRepo, sha)
-	log.Printf("🔍 Monitoring commit status for SHA: %s", sha)
+	statusURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s/status", GitHubOwner, repo, sha)
+	log.Printf("🔍 Monitoring commit status for PR #%d in repo %s (SHA: %s)", prNumber, repo, sha)
+
+	timeout := time.After(15 * time.Minute)
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
 
 	for {
-		req, _ := http.NewRequest("GET", statusURL, nil)
-		req.Header.Set("Authorization", "token "+token)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			log.Fatalf("❌ Failed to fetch commit status: %v", err)
-		}
-		defer resp.Body.Close()
+		select {
+		case <-timeout:
+			log.Printf("⏰ Timeout reached while waiting for status checks on PR #%d in repo %s", prNumber, repo)
+			return "timeout"
 
-		var result struct {
-			State string `json:"state"` // success, failure, pending
-		}
-		json.NewDecoder(resp.Body).Decode(&result)
+		case <-ticker.C:
+			req, _ := http.NewRequest("GET", statusURL, nil)
+			req.Header.Set("Authorization", "token "+token)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				log.Printf("❌ Failed to fetch commit status for PR #%d in repo %s: %v", prNumber, repo, err)
+				return "failed"
+			}
+			defer resp.Body.Close()
 
-		switch result.State {
-		case "success":
-			log.Println("✅ All checks passed. Merging PR...")
-			mergePR(prNumber, branch, token)
-			return
-		case "failure", "error":
-			log.Fatalf("❌ Status checks failed for PR #%d. Aborting.", prNumber)
-		case "pending":
-			log.Println("⏳ Status checks pending...")
-			time.Sleep(10 * time.Second)
-		default:
-			log.Printf("⚠️ Unknown status '%s'. Retrying...", result.State)
-			time.Sleep(10 * time.Second)
+			var result struct {
+				State string `json:"state"` // success, failure, pending
+			}
+			json.NewDecoder(resp.Body).Decode(&result)
+
+			switch result.State {
+			case "success":
+				log.Printf("✅ All checks passed for PR #%d in repo %s. Merging...", prNumber, repo)
+				mergePR(repo, prNumber, branch, token)
+				return "success"
+
+			case "failure", "error":
+				log.Printf("❌ Status checks failed for PR #%d in repo %s. Skipping merge.", prNumber, repo)
+				return "failed"
+
+			case "pending":
+				log.Printf("⏳ Status checks pending for PR #%d in repo %s...", prNumber, repo)
+
+			default:
+				log.Printf("⚠️ Unknown status '%s' for PR #%d in repo %s. Retrying...", result.State, prNumber, repo)
+			}
 		}
 	}
 }
 
-func mergePR(prNumber int, branch, token string) {
-	mergeURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/merge", GitHubOwner, GitHubRepo, prNumber)
+func mergePR(repo string, prNumber int, branch, token string) {
+	mergeURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/merge", GitHubOwner, repo, prNumber)
+
 	body := map[string]string{
 		"commit_title": fmt.Sprintf("auto-merge PR #%d", prNumber),
 	}
@@ -226,7 +287,8 @@ func mergePR(prNumber int, branch, token string) {
 	log.Printf("🎉 PR #%d merged successfully!", prNumber)
 
 	// Delete branch
-	delURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/refs/heads/%s", GitHubOwner, GitHubRepo, branch)
+	delURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/refs/heads/%s", GitHubOwner, repo, branch)
+
 	req, _ = http.NewRequest("DELETE", delURL, nil)
 	req.Header.Set("Authorization", "token "+token)
 
@@ -346,11 +408,22 @@ func detectModules(repoPath string) []TerraformModule {
 	moduleStartRe := regexp.MustCompile(`^\s*module\s+"[^"]+"\s*{`)
 
 	_ = filepath.Walk(repoPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil || !strings.HasSuffix(path, ".tf") {
+		if err != nil {
+			log.Printf("⚠️ Error reading file %s: %v", path, err)
 			return nil
 		}
 
-		contentBytes, _ := os.ReadFile(path)
+		if info.IsDir() || !strings.HasSuffix(path, ".tf") {
+			return nil
+		}
+
+		log.Printf("🔍 Scanning file: %s", path)
+		contentBytes, err := os.ReadFile(path)
+		if err != nil {
+			log.Printf("⚠️ Failed to read file %s: %v", path, err)
+			return nil
+		}
+
 		lines := strings.Split(string(contentBytes), "\n")
 
 		var inModuleBlock bool
@@ -359,13 +432,12 @@ func detectModules(repoPath string) []TerraformModule {
 		for _, line := range lines {
 			trim := strings.TrimSpace(line)
 
-			if moduleStartRe.MatchString(line) {
+			if moduleStartRe.MatchString(trim) {
 				inModuleBlock = true
 				current = TerraformModule{Path: path}
 			}
 
 			if inModuleBlock {
-				// Extract source
 				if strings.HasPrefix(trim, "source") {
 					val := extractValue(trim)
 					current.Source = val
@@ -392,14 +464,18 @@ func detectModules(repoPath string) []TerraformModule {
 					}
 				}
 
-				// Extract version
 				if strings.HasPrefix(trim, "version") {
 					val := extractValue(trim)
 					current.Version = val
 				}
 
 				if strings.HasPrefix(trim, "}") {
-					if current.Source != "" && current.Version != "" {
+					if current.Source == "" {
+						log.Printf("⚠️ Skipping module in %s: missing source", path)
+					} else if current.Version == "" {
+						log.Printf("⚠️ Skipping module in %s: missing version", path)
+					} else {
+						log.Printf("✅ Found module: %s version=%s", current.Source, current.Version)
 						modules = append(modules, current)
 					}
 					inModuleBlock = false
@@ -409,6 +485,10 @@ func detectModules(repoPath string) []TerraformModule {
 
 		return nil
 	})
+
+	if len(modules) == 0 {
+		log.Println("📭 No modules with both source and version found.")
+	}
 
 	return modules
 }
@@ -586,16 +666,47 @@ func isMajorUpgrade(current, latest string) bool {
 	return curr.Major() < newV.Major()
 }
 
-func createPR(repoPath string, mods []TerraformModule, branch, token string) {
+func createPR(repo, repoPath string, mods []TerraformModule, _unused string, token string) {
+	branch := fmt.Sprintf("bot-upgrades-%s", strings.ReplaceAll(repo, ".", "-"))
+	runGit(repoPath, "checkout", "main")
+	log.Printf("🧨 Deleting remote branch: %s", branch)
+	runGitOptional(repoPath, "push", "origin", "--delete", branch)
+
+	log.Println("⏳ Waiting for GitHub to unlock deleted ref...")
+	time.Sleep(4 * time.Second)
+
 	runGit(repoPath, "checkout", "-b", branch)
 	runGit(repoPath, "add", ".")
 	runGit(repoPath, "commit", "-m", "chore: upgrade Terraform modules")
-	runGit(repoPath, "push", "--force", "--set-upstream", "origin", branch)
+	// ... (rest of function unchanged)
+
+	maxRetries := 5
+	var pushErr error
+	for i := 1; i <= maxRetries; i++ {
+		log.Printf("📤 Attempt %d to push branch '%s'...", i, branch)
+		pushErr = runGitWithErr(repoPath, "push", "--force", "--set-upstream", "origin", branch)
+		if pushErr == nil {
+			log.Println("✅ Push successful.")
+			break
+		}
+		log.Printf("❌ Push failed (attempt %d): %v", i, pushErr)
+		time.Sleep(time.Duration(i*2) * time.Second) // backoff
+	}
+	if pushErr != nil {
+		log.Fatalf("❌ Failed to push branch after %d attempts: %v", maxRetries, pushErr)
+	}
+
+	// Check if a PR already exists
+	if pr := getOpenPRNumber(repo, branch, token); pr > 0 {
+		log.Printf("⚠️ PR already exists for branch '%s' in repo '%s', skipping PR creation.", branch, repo)
+		return
+	}
 
 	title := buildPRTitle(mods)
 	body := "**This PR updates Terraform module versions.**"
 
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", GitHubOwner, GitHubRepo)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", GitHubOwner, repo)
+
 	payload := map[string]string{"title": title, "head": branch, "base": "main", "body": body}
 	jsonBody, _ := json.Marshal(payload)
 
@@ -608,6 +719,12 @@ func createPR(repoPath string, mods []TerraformModule, branch, token string) {
 		log.Fatalf("❌ PR request failed: %v", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		log.Fatalf("❌ Failed to create PR: %s", string(body))
+	}
+
 	log.Println("✅ Pull request created!")
 }
 
@@ -621,12 +738,14 @@ func buildPRTitle(mods []TerraformModule) string {
 	return fmt.Sprintf("Update %d Terraform modules", len(mods))
 }
 
-func cloneRepo(token string) string {
-	repoURL := fmt.Sprintf("https://github.com/%s/%s.git", GitHubOwner, GitHubRepo)
-	repoPath := filepath.Join(os.TempDir(), GitHubRepo)
-	os.RemoveAll(repoPath)
+func cloneRepo(token, repo string) string {
+	repoURL := fmt.Sprintf("https://github.com/%s/%s.git", GitHubOwner, repo)
+	repoPath, err := os.MkdirTemp("", fmt.Sprintf("repo-%s-*", repo))
+	if err != nil {
+		log.Fatalf("❌ Failed to create temp dir: %v", err)
+	}
 
-	_, err := git.PlainClone(repoPath, false, &git.CloneOptions{
+	_, err = git.PlainClone(repoPath, false, &git.CloneOptions{
 		URL: repoURL,
 		Auth: &gitHttp.BasicAuth{
 			Username: "x-access-token",
@@ -636,9 +755,37 @@ func cloneRepo(token string) string {
 	})
 
 	if err != nil {
-		log.Fatalf("❌ Clone failed: %v", err)
+		log.Fatalf("❌ Clone failed for %s: %v", repo, err)
 	}
 	return repoPath
+}
+
+func getOpenPRNumber(repo, branch, token string) int {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", GitHubOwner, repo)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Authorization", "token "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("❌ Failed to get PRs for %s: %v", repo, err)
+		return -1
+	}
+	defer resp.Body.Close()
+
+	var prs []struct {
+		Number int `json:"number"`
+		Head   struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
+	}
+	json.NewDecoder(resp.Body).Decode(&prs)
+
+	for _, pr := range prs {
+		if pr.Head.Ref == branch {
+			return pr.Number
+		}
+	}
+	return -1
 }
 
 func runGit(repoPath string, args ...string) {
@@ -649,4 +796,36 @@ func runGit(repoPath string, args ...string) {
 	if err := cmd.Run(); err != nil {
 		log.Fatalf("❌ Git failed: %v", err)
 	}
+}
+
+func runGitOptional(repoPath string, args ...string) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = repoPath
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	_ = cmd.Run() // we ignore errors on purpose
+}
+
+func runGitWithErr(repoPath string, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = repoPath
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func deduplicate(repos []string) []string {
+	seen := make(map[string]struct{})
+	var unique []string
+	for _, repo := range repos {
+		trimmed := strings.TrimSpace(repo)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; !exists {
+			seen[trimmed] = struct{}{}
+			unique = append(unique, trimmed)
+		}
+	}
+	return unique
 }
