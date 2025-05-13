@@ -34,6 +34,7 @@ var (
 )
 
 var GitHubRepos = deduplicate(strings.Split(os.Getenv("GITHUB_REPOS"), ","))
+var AutoMergeEnabled = strings.ToLower(os.Getenv("AUTO_MERGE")) == "true"
 
 type TerraformModule struct {
 	Path       string
@@ -243,9 +244,14 @@ func monitorAndMergePR(repo string, prNumber int, branch, token string) string {
 
 			switch result.State {
 			case "success":
-				log.Printf("✅ All checks passed for PR #%d in repo %s. Merging...", prNumber, repo)
-				mergePR(repo, prNumber, branch, token)
-				return "success"
+				log.Printf("✅ All checks passed for PR #%d in repo %s.", prNumber, repo)
+				if AutoMergeEnabled {
+					log.Printf("🔁 Auto-merge is enabled. Merging PR #%d...", prNumber)
+					mergePR(repo, prNumber, branch, token)
+					return "success"
+				}
+				log.Printf("🚫 Auto-merge is disabled. Skipping merge for PR #%d.", prNumber)
+				return "skipped"
 
 			case "failure", "error":
 				log.Printf("❌ Status checks failed for PR #%d in repo %s. Skipping merge.", prNumber, repo)
@@ -829,3 +835,4 @@ func deduplicate(repos []string) []string {
 	}
 	return unique
 }
+
