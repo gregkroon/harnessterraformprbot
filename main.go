@@ -33,7 +33,7 @@ var (
 )
 
 var GitHubRepos = deduplicate(strings.Split(os.Getenv("GITHUB_REPOS"), ","))
-var AutoMergeEnabled = strings.ToLower(os.Getenv("AUTO_MERGE")) == "true"
+var AutoMergeEnabled = strings.ToLower(os.Getenv("AUTO_MERGE"))
 
 type TerraformModule struct {
 	Path       string
