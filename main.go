@@ -643,12 +643,17 @@ func generateJWT() string {
 }
 
 func loadPrivateKey() *rsa.PrivateKey {
-	key := os.Getenv("GITHUB_PRIVATE_KEY")
-	if key == "" {
+	rawKey := os.Getenv("GITHUB_PRIVATE_KEY")
+	if rawKey == "" {
 		log.Fatal("❌ GITHUB_PRIVATE_KEY environment variable is not set")
 	}
 
-	block, _ := pem.Decode([]byte(key))
+	// Handle escaped newlines
+	rawKey = strings.ReplaceAll(rawKey, `\n`, "\n")
+	rawKey = strings.TrimSpace(rawKey) // remove leading/trailing whitespace
+	rawKey = strings.Trim(rawKey, "\"") // remove surrounding quotes, if any
+
+	block, _ := pem.Decode([]byte(rawKey))
 	if block == nil {
 		log.Fatal("❌ Failed to parse PEM block from GITHUB_PRIVATE_KEY")
 	}
@@ -659,6 +664,7 @@ func loadPrivateKey() *rsa.PrivateKey {
 	}
 	return parsedKey
 }
+
 
 
 func shouldUpgrade(current, latest string) bool {
