@@ -648,10 +648,13 @@ func loadPrivateKey() *rsa.PrivateKey {
 		log.Fatal("❌ GITHUB_PRIVATE_KEY environment variable is not set")
 	}
 
-	// Handle escaped newlines
+	// 🔍 Debug log to inspect formatting
+	log.Printf("🔍 Raw key (first 50 chars): %.50s", rawKey)
+
+	// Handle escaped newlines and cleanup
 	rawKey = strings.ReplaceAll(rawKey, `\n`, "\n")
-	rawKey = strings.TrimSpace(rawKey) // remove leading/trailing whitespace
-	rawKey = strings.Trim(rawKey, "\"") // remove surrounding quotes, if any
+	rawKey = strings.TrimSpace(rawKey)
+	rawKey = strings.Trim(rawKey, "\"")
 
 	block, _ := pem.Decode([]byte(rawKey))
 	if block == nil {
@@ -664,6 +667,7 @@ func loadPrivateKey() *rsa.PrivateKey {
 	}
 	return parsedKey
 }
+
 
 
 func shouldUpgrade(current, latest string) bool {
