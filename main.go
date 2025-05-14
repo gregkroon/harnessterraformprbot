@@ -642,17 +642,19 @@ func generateJWT() string {
 	return signedToken
 }
 
+
 func loadPrivateKey() *rsa.PrivateKey {
 	rawKey := os.Getenv("GITHUB_PRIVATE_KEY")
 	if rawKey == "" {
 		log.Fatal("❌ GITHUB_PRIVATE_KEY environment variable is not set")
 	}
 
-	// 🔍 Debug log to inspect formatting
 	log.Printf("🔍 Raw key (first 50 chars): %.50s", rawKey)
 
-	// Handle escaped newlines and cleanup
+	// Common fixes for escaped or broken format
 	rawKey = strings.ReplaceAll(rawKey, `\n`, "\n")
+	rawKey = strings.Replace(rawKey, "-----BEGIN RSA PRIVATE KEY----- ", "-----BEGIN RSA PRIVATE KEY-----\n", 1)
+	rawKey = strings.Replace(rawKey, " -----END RSA PRIVATE KEY-----", "\n-----END RSA PRIVATE KEY-----", 1)
 	rawKey = strings.TrimSpace(rawKey)
 	rawKey = strings.Trim(rawKey, "\"")
 
@@ -667,7 +669,6 @@ func loadPrivateKey() *rsa.PrivateKey {
 	}
 	return parsedKey
 }
-
 
 
 func shouldUpgrade(current, latest string) bool {
