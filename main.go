@@ -57,7 +57,7 @@ type PRResult struct {
 
 func main() {
 	required := []string{
-		"HARNESS_API_KEY", "GITHUB_OWNER", "GITHUB_APP_ID", "GITHUB_INSTALLATION_ID", "GROUP_BRANCH_NAME", "GITHUB_PRIVATE_KEY_PATH", "GITHUB_REPOS",
+		"HARNESS_API_KEY", "GITHUB_OWNER", "GITHUB_APP_ID", "GITHUB_INSTALLATION_ID", "GROUP_BRANCH_NAME", "GITHUB_REPOS",
 	}
 	for _, env := range required {
 		if os.Getenv(env) == "" {
