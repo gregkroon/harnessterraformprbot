@@ -666,7 +666,6 @@ func loadPrivateKey() *rsa.PrivateKey {
 }
 
 
-
 func shouldUpgrade(current, latest string) bool {
 	currentV, err1 := semver.NewVersion(strings.TrimPrefix(current, "v"))
 	latestV, err2 := semver.NewVersion(strings.TrimPrefix(latest, "v"))
