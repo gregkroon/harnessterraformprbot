@@ -685,6 +685,7 @@ func isMajorUpgrade(current, latest string) bool {
 
 func createPR(repo, repoPath string, mods []TerraformModule, _unused string, token string) {
 	branch := fmt.Sprintf("bot-upgrades-%s", strings.ReplaceAll(repo, ".", "-"))
+
 	runGit(repoPath, "checkout", "main")
 	log.Printf("🧨 Deleting remote branch: %s", branch)
 	runGitOptional(repoPath, "push", "origin", "--delete", branch)
@@ -694,9 +695,22 @@ func createPR(repo, repoPath string, mods []TerraformModule, _unused string, tok
 
 	runGit(repoPath, "checkout", "-b", branch)
 	runGit(repoPath, "add", ".")
-	runGit(repoPath, "commit", "-m", "chore: upgrade Terraform modules")
-	// ... (rest of function unchanged)
 
+	// ✅ Git author identity from env or fallback
+	authorName := os.Getenv("GIT_AUTHOR_NAME")
+	if authorName == "" {
+		authorName = "Terraform Upgrade Bot"
+	}
+	authorEmail := os.Getenv("GIT_AUTHOR_EMAIL")
+	if authorEmail == "" {
+		authorEmail = "bot@harness.io"
+	}
+	runGit(repoPath, "config", "user.name", authorName)
+	runGit(repoPath, "config", "user.email", authorEmail)
+
+	runGit(repoPath, "commit", "-m", "chore: upgrade Terraform modules")
+
+	// ✅ Retry git push up to 5 times with backoff
 	maxRetries := 5
 	var pushErr error
 	for i := 1; i <= maxRetries; i++ {
@@ -707,13 +721,13 @@ func createPR(repo, repoPath string, mods []TerraformModule, _unused string, tok
 			break
 		}
 		log.Printf("❌ Push failed (attempt %d): %v", i, pushErr)
-		time.Sleep(time.Duration(i*2) * time.Second) // backoff
+		time.Sleep(time.Duration(i*2) * time.Second) // exponential backoff
 	}
 	if pushErr != nil {
 		log.Fatalf("❌ Failed to push branch after %d attempts: %v", maxRetries, pushErr)
 	}
 
-	// Check if a PR already exists
+	// ✅ Check if a PR already exists
 	if pr := getOpenPRNumber(repo, branch, token); pr > 0 {
 		log.Printf("⚠️ PR already exists for branch '%s' in repo '%s', skipping PR creation.", branch, repo)
 		return
@@ -744,6 +758,7 @@ func createPR(repo, repoPath string, mods []TerraformModule, _unused string, tok
 
 	log.Println("✅ Pull request created!")
 }
+
 
 func buildPRTitle(mods []TerraformModule) string {
 	if len(mods) == 1 {
