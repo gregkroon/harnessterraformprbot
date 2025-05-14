@@ -30,7 +30,7 @@ var (
 	GitHubAppID          = os.Getenv("GITHUB_APP_ID")
 	GitHubInstallationID = os.Getenv("GITHUB_INSTALLATION_ID")
 	GroupBranchName      = os.Getenv("GROUP_BRANCH_NAME")
-	PrivateKeyPath       = os.Getenv("GITHUB_PRIVATE_KEY_PATH")
+	
 )
 
 var GitHubRepos = deduplicate(strings.Split(os.Getenv("GITHUB_REPOS"), ","))
