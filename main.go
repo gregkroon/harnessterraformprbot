@@ -643,14 +643,14 @@ func generateJWT() string {
 }
 
 func loadPrivateKey() *rsa.PrivateKey {
-	keyBytes, err := os.ReadFile(PrivateKeyPath)
-	if err != nil {
-		log.Fatalf("❌ Failed to read private key file: %v", err)
+	key := os.Getenv("GITHUB_PRIVATE_KEY")
+	if key == "" {
+		log.Fatal("❌ GITHUB_PRIVATE_KEY environment variable is not set")
 	}
 
-	block, _ := pem.Decode(keyBytes)
+	block, _ := pem.Decode([]byte(key))
 	if block == nil {
-		log.Fatalf("❌ Failed to parse PEM block")
+		log.Fatal("❌ Failed to parse PEM block from GITHUB_PRIVATE_KEY")
 	}
 
 	parsedKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
@@ -659,6 +659,7 @@ func loadPrivateKey() *rsa.PrivateKey {
 	}
 	return parsedKey
 }
+
 
 func shouldUpgrade(current, latest string) bool {
 	currentV, err1 := semver.NewVersion(strings.TrimPrefix(current, "v"))
