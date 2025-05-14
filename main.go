@@ -756,21 +756,16 @@ func buildPRTitle(mods []TerraformModule) string {
 }
 
 func cloneRepo(token, repo string) string {
-	repoURL := fmt.Sprintf("https://github.com/%s/%s.git", GitHubOwner, repo)
+	repoURL := fmt.Sprintf("https://x-access-token:%s@github.com/%s/%s.git", token, GitHubOwner, repo)
 	repoPath, err := os.MkdirTemp("", fmt.Sprintf("repo-%s-*", repo))
 	if err != nil {
 		log.Fatalf("❌ Failed to create temp dir: %v", err)
 	}
 
 	_, err = git.PlainClone(repoPath, false, &git.CloneOptions{
-		URL: repoURL,
-		Auth: &gitHttp.BasicAuth{
-			Username: "x-access-token",
-			Password: token,
-		},
+		URL:      repoURL,
 		Progress: os.Stdout,
 	})
-
 	if err != nil {
 		log.Fatalf("❌ Clone failed for %s: %v", repo, err)
 	}
