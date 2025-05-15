@@ -108,3 +108,48 @@ pipeline:
 ```
 
 Trigger this pipeline on a recurring schedule (e.g., weekly) to check and upgrade all referenced modules.
+
+## 🔄 High-Level Workflow
+
+This is how the system works end-to-end:
+
+### 1. **Publish a New Module Version**
+
+* Commit changes to a Terraform module repo
+* Tag the new release:
+
+  ```bash
+  git tag v1.2.3
+  git push origin v1.2.3
+  ```
+
+### 2. **Sync Harness IACM Module Registry**
+
+* Harness periodically or manually syncs the registry with new module versions
+
+### 3. **Scheduled Upgrade Pipeline**
+
+* A Harness pipeline runs daily/weekly via **cron trigger**
+* Executes this bot in a Docker container
+* Scans defined GitHub repos for outdated Terraform modules
+
+### 4. **Pull Request Flow**
+
+* Bot creates PRs for modules with version upgrades:
+
+  * Minor/patch upgrades are batched
+  * Major upgrades have separate PRs
+* PRs trigger Harness CI/CD pipelines via GitHub Webhook
+
+### 5. **Pipeline Validation**
+
+* Harness pipeline:
+
+  * Runs `terraform init`, `plan`, and `apply` (dry run)
+  * Performs static analysis via Checkov or Terrascan
+  * Optionally requires manual approval
+* PR is auto-merged if all checks pass
+
+### 6. **Production Promotion**
+
+* A second stage can trigger a promotion pipeline to apply module upgrades to production environments
