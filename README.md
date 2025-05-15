@@ -60,3 +60,51 @@ go build -o terraform-upgrade-bot .
 docker build -t munkys123/harnessterraformprbot:latest .
 docker push munkys123/harnessterraformprbot:latest
 ```
+## 🐳 Example Harness Scheduled Upgrade Pipeline (Cron Trigger)
+
+You can run this bot on a schedule in Harness via a **cron-triggered pipeline**.
+
+```yaml
+pipeline:
+  name: Scheduled Upgrade
+  identifier: Scheduled_Upgrade
+  projectIdentifier: westpacmvp
+  orgIdentifier: default
+  stages:
+    - stage:
+        name: PR Bot
+        identifier: PR_Bot
+        type: IACM
+        spec:
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          workspace: westpac
+          execution:
+            steps:
+              - step:
+                  type: Run
+                  name: PR bot
+                  identifier: PR_bot
+                  spec:
+                    connectorRef: account.dockerhubkroon
+                    image: munkys123/harnessterraformprbot:latest
+                    shell: Bash
+                    command: /terraform-upgrade-bot
+                    envVariables:
+                      HARNESS_API_KEY: <+secrets.getValue("Harness_API_Key")>
+                      GROUP_BRANCH_NAME: bot-terraform-upgrades
+                      GITHUB_REPOS: terraform-module-upgrade-demo-harnessrepo1,terraform-module-upgrade-demo-harnessrepo2
+                      GITHUB_OWNER: gregkroonorg
+                      GITHUB_APP_ID: "1234"
+                      GITHUB_INSTALLATION_ID: "1234"
+                      GITHUB_PRIVATE_KEY: <+secrets.getValue("githubapppem")>
+                      GIT_AUTHOR_NAME: gregkroon
+                      GIT_AUTHOR_EMAIL: blah@users.noreply.github.com
+                      AUTO_MERGE: "true"
+```
+
+Trigger this pipeline on a recurring schedule (e.g., weekly) to check and upgrade all referenced modules.
