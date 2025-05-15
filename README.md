@@ -52,3 +52,11 @@ This bot uses a **GitHub App** instead of a PAT for secure and scalable repo acc
 git clone https://github.com/gregkroon/harnessterraformprbot.git
 cd harnessterraformprbot
 go build -o terraform-upgrade-bot .
+```
+
+### 2. Build and Push Docker Image
+
+```bash
+docker build -t munkys123/harnessterraformprbot:latest .
+docker push munkys123/harnessterraformprbot:latest
+```
