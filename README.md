@@ -1,6 +1,6 @@
 # 🛠️ Harness Terraform Module Upgrade Bot
 
-A GitHub App-powered Go bot that scans one or more repositories for outdated Terraform module versions and automatically creates pull requests to upgrade them. Ideal for platform and DevOps teams using GitHub and Harness to maintain Terraform infrastructure at scale.
+A Harness powered Go bot that scans one or more repositories for outdated Terraform module versions and automatically creates pull requests to upgrade them. Ideal for platform and DevOps teams using GitHub and Harness to maintain Terraform infrastructure at scale.
 
 ---
 
