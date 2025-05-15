@@ -648,7 +648,7 @@ func loadPrivateKey() *rsa.PrivateKey {
 		log.Fatal("❌ GITHUB_PRIVATE_KEY environment variable is not set")
 	}
 
-	log.Printf("🔍 Raw key (first 50 chars): %.50s", rawKey)
+
 
 	// Common fixes for escaped or broken format
 	rawKey = strings.ReplaceAll(rawKey, `\n`, "\n")
